@@ -31,24 +31,23 @@ function CameraController() {
   const isReloading = useGameStore((s) => s.isReloading);
   const finishReload = useGameStore((s) => s.finishReload);
   const ammo = useGameStore((s) => s.ammo);
+  const pendingShot = useGameStore((s) => s.pendingShot);
+  const clearPendingShot = useGameStore((s) => s.clearPendingShot);
   const reloadTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Touch state
+  const touchId = useRef<number | null>(null);
+  const lastTouchX = useRef(0);
+  const lastTouchY = useRef(0);
+  const isMobile = useRef(false);
 
   const [, getKeys] = useKeyboardControls<Controls>();
 
   useEffect(() => {
+    isMobile.current = "ontouchstart" in window || navigator.maxTouchPoints > 0;
+    if (isMobile.current) isLocked.current = true;
     camera.position.set(0, 1.7, 0);
   }, [camera]);
-
-  const handleMouseMove = useCallback(
-    (e: MouseEvent) => {
-      if (!isLocked.current) return;
-      const sens = isScoped ? 0.0008 : 0.002;
-      yaw.current -= e.movementX * sens;
-      pitch.current -= e.movementY * sens;
-      pitch.current = Math.max(-0.8, Math.min(0.3, pitch.current));
-    },
-    [isScoped]
-  );
 
   const doRaycast = useCallback(() => {
     const raycaster = new THREE.Raycaster();
@@ -74,69 +73,123 @@ function CameraController() {
     return closest;
   }, [camera, targets, isScoped]);
 
+  const processShot = useCallback(() => {
+    if (phase !== "playing") return;
+    if (isReloading) return;
+    const fired = shoot();
+    if (!fired) {
+      if (ammo <= 0) startReload();
+      return;
+    }
+    const hit = doRaycast();
+    if (hit) killTarget(hit.id);
+  }, [phase, isReloading, shoot, ammo, doRaycast, killTarget, startReload]);
+
+  // ── Mouse handlers ──────────────────────────────────────────────
+  const handleMouseMove = useCallback(
+    (e: MouseEvent) => {
+      if (!isLocked.current) return;
+      const sens = isScoped ? 0.0008 : 0.002;
+      yaw.current -= e.movementX * sens;
+      pitch.current -= e.movementY * sens;
+      pitch.current = Math.max(-0.8, Math.min(0.3, pitch.current));
+    },
+    [isScoped]
+  );
+
   const handleClick = useCallback(
     (e: MouseEvent) => {
       if (phase !== "playing") return;
       if (e.button === 2) return;
+      if (isMobile.current) return; // mobile uses fire button, not canvas tap
       if (!isLocked.current) {
         gl.domElement.requestPointerLock();
         return;
       }
-      if (isReloading) return;
-      const fired = shoot();
-      if (!fired) {
-        if (ammo <= 0) startReload();
-        return;
-      }
-
-      const hit = doRaycast();
-      if (hit) {
-        killTarget(hit.id);
-      }
+      processShot();
     },
-    [phase, isReloading, shoot, ammo, doRaycast, killTarget, startReload, gl]
+    [phase, processShot, gl]
   );
 
   const handleContextMenu = useCallback(
     (e: MouseEvent) => {
       e.preventDefault();
-      if (isLocked.current) {
-        setScoped(!isScoped);
-      }
+      if (isLocked.current) setScoped(!isScoped);
     },
     [isScoped, setScoped]
   );
 
+  // ── Touch handlers ───────────────────────────────────────────────
+  const handleTouchStart = useCallback(
+    (e: TouchEvent) => {
+      if (phase !== "playing") return;
+      for (const touch of Array.from(e.changedTouches)) {
+        const target = touch.target as HTMLElement;
+        if (target.closest("[data-hud]")) continue;
+        if (touchId.current === null) {
+          touchId.current = touch.identifier;
+          lastTouchX.current = touch.clientX;
+          lastTouchY.current = touch.clientY;
+        }
+      }
+    },
+    [phase]
+  );
+
+  const handleTouchMove = useCallback(
+    (e: TouchEvent) => {
+      e.preventDefault();
+      for (const touch of Array.from(e.changedTouches)) {
+        if (touch.identifier !== touchId.current) continue;
+        const dx = touch.clientX - lastTouchX.current;
+        const dy = touch.clientY - lastTouchY.current;
+        const sens = isScoped ? 0.0045 : 0.009;
+        yaw.current -= dx * sens;
+        pitch.current -= dy * sens;
+        pitch.current = Math.max(-1.3, Math.min(0.8, pitch.current));
+        lastTouchX.current = touch.clientX;
+        lastTouchY.current = touch.clientY;
+      }
+    },
+    [isScoped]
+  );
+
+  const handleTouchEnd = useCallback((e: TouchEvent) => {
+    for (const touch of Array.from(e.changedTouches)) {
+      if (touch.identifier === touchId.current) touchId.current = null;
+    }
+  }, []);
+
   useEffect(() => {
     const onLockChange = () => {
       isLocked.current = document.pointerLockElement === gl.domElement;
-      if (!isLocked.current) setScoped(false);
+      if (!isLocked.current && !isMobile.current) setScoped(false);
     };
+
     document.addEventListener("pointerlockchange", onLockChange);
     gl.domElement.addEventListener("click", handleClick);
     gl.domElement.addEventListener("contextmenu", handleContextMenu);
     document.addEventListener("mousemove", handleMouseMove);
+
+    gl.domElement.addEventListener("touchstart", handleTouchStart, { passive: true });
+    gl.domElement.addEventListener("touchmove", handleTouchMove, { passive: false });
+    gl.domElement.addEventListener("touchend", handleTouchEnd, { passive: true });
+
     return () => {
       document.removeEventListener("pointerlockchange", onLockChange);
       gl.domElement.removeEventListener("click", handleClick);
       gl.domElement.removeEventListener("contextmenu", handleContextMenu);
       document.removeEventListener("mousemove", handleMouseMove);
+      gl.domElement.removeEventListener("touchstart", handleTouchStart);
+      gl.domElement.removeEventListener("touchmove", handleTouchMove);
+      gl.domElement.removeEventListener("touchend", handleTouchEnd);
     };
-  }, [gl, handleClick, handleContextMenu, handleMouseMove, setScoped]);
-
-  useEffect(() => {
-    const keys = getKeys();
-    if (keys.reload && !isReloading && ammo < 10) {
-      startReload();
-    }
-  });
+  }, [gl, handleClick, handleContextMenu, handleMouseMove, handleTouchStart, handleTouchMove, handleTouchEnd, setScoped]);
 
   useEffect(() => {
     if (isReloading) {
       if (reloadTimer.current) clearTimeout(reloadTimer.current);
-      reloadTimer.current = setTimeout(() => {
-        finishReload();
-      }, 2500);
+      reloadTimer.current = setTimeout(() => finishReload(), 2500);
     }
     return () => {
       if (reloadTimer.current) clearTimeout(reloadTimer.current);
@@ -145,16 +198,21 @@ function CameraController() {
 
   useFrame(() => {
     const keys = getKeys();
-    if (keys.reload && !isReloading && ammo < 10) {
-      startReload();
+    if (keys.reload && !isReloading && ammo < 10) startReload();
+
+    // Process pending shot from mobile fire button
+    if (pendingShot) {
+      clearPendingShot();
+      processShot();
     }
 
     const euler = new THREE.Euler(pitch.current, yaw.current, 0, "YXZ");
     camera.quaternion.setFromEuler(euler);
 
     const targetFov = isScoped ? 15 : 75;
-    camera.fov += (targetFov - camera.fov) * 0.15;
-    camera.updateProjectionMatrix();
+    const perspCam = camera as THREE.PerspectiveCamera;
+    perspCam.fov += (targetFov - perspCam.fov) * 0.15;
+    perspCam.updateProjectionMatrix();
   });
 
   return null;
@@ -184,32 +242,56 @@ function TargetAnimator() {
   return null;
 }
 
+const DEATH_LINGER_MS = 900;
+
 function SceneContents() {
   const targets = useGameStore((s) => s.targets);
-  const isScoped = useGameStore((s) => s.isScoped);
 
   return (
     <>
-      <Sky sunPosition={[100, 80, 100]} turbidity={6} rayleigh={0.5} />
-      <ambientLight intensity={0.6} />
-      <directionalLight position={[50, 80, 30]} intensity={1.2} castShadow />
-      <directionalLight position={[-30, 40, -20]} intensity={0.3} color="#a0c4ff" />
-      <fog attach="fog" args={["#c9e0f0", 150, 350]} />
+      {/* Golden-hour sky */}
+      <Sky
+        sunPosition={[60, 18, 120]}
+        turbidity={9}
+        rayleigh={2.2}
+        mieCoefficient={0.008}
+        mieDirectionalG={0.88}
+      />
+
+      {/* Hemisphere bounce — warm sky top, cool earth bottom */}
+      <hemisphereLight args={["#bdd4f0", "#4a5a30", 0.55]} />
+
+      {/* Main sun — warm golden angle */}
+      <directionalLight
+        position={[60, 40, 80]}
+        intensity={1.6}
+        color="#ffe8b0"
+        castShadow
+        shadow-mapSize-width={2048}
+        shadow-mapSize-height={2048}
+        shadow-camera-far={300}
+        shadow-camera-left={-80}
+        shadow-camera-right={80}
+        shadow-camera-top={80}
+        shadow-camera-bottom={-80}
+      />
+
+      {/* Soft fill from opposite sky */}
+      <directionalLight position={[-50, 30, -30]} intensity={0.25} color="#c0d8ff" />
+
+      {/* Warm haze fog matching golden hour */}
+      <fog attach="fog" args={["#d4b880", 120, 320]} />
 
       <CameraController />
       <TargetAnimator />
       <Environment />
 
-      {targets.map((t) =>
-        t.alive ? <TargetMesh key={t.id} target={t} /> : null
-      )}
-
-      {isScoped && (
-        <mesh position={[0, 0, -0.01]}>
-          <planeGeometry args={[0.001, 0.001]} />
-          <meshBasicMaterial transparent opacity={0} />
-        </mesh>
-      )}
+      {targets.map((t) => {
+        if (t.alive) return <TargetMesh key={t.id} target={t} />;
+        if (t.killedAt && Date.now() - t.killedAt < DEATH_LINGER_MS)
+          return <TargetMesh key={t.id} target={t} />;
+        return null;
+      })}
     </>
   );
 }

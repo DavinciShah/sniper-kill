@@ -12,6 +12,13 @@ export interface Target {
   direction: number;
   boundsMin: number;
   boundsMax: number;
+  killedAt?: number;
+}
+
+export interface KillInfo {
+  pts: number;
+  dist: number;
+  id: string;
 }
 
 interface GameState {
@@ -27,6 +34,8 @@ interface GameState {
   reloadProgress: number;
   targets: Target[];
   lastShot: number;
+  pendingShot: boolean;
+  lastKill: KillInfo | null;
 
   setPhase: (p: GamePhase) => void;
   setScoped: (v: boolean) => void;
@@ -38,6 +47,9 @@ interface GameState {
   nextWave: () => void;
   setTargets: (t: Target[]) => void;
   resetGame: () => void;
+  triggerShot: () => void;
+  clearPendingShot: () => void;
+  clearLastKill: () => void;
 }
 
 function spawnTargets(wave: number): Target[] {
@@ -76,6 +88,8 @@ export const useGameStore = create<GameState>((set, get) => ({
   reloadProgress: 0,
   targets: [],
   lastShot: 0,
+  pendingShot: false,
+  lastKill: null,
 
   setPhase: (phase) => {
     if (phase === "playing" && get().phase === "menu") {
@@ -114,9 +128,12 @@ export const useGameStore = create<GameState>((set, get) => ({
     const dist = target.distance;
     const pts = dist >= 100 ? 300 : dist >= 80 ? 200 : dist >= 60 ? 150 : 100;
 
-    const newTargets = targets.map((t) => (t.id === id ? { ...t, alive: false } : t));
+    const now = Date.now();
+    const newTargets = targets.map((t) =>
+      t.id === id ? { ...t, alive: false, killedAt: now } : t
+    );
     const newKills = kills + 1;
-    set({ targets: newTargets, kills: newKills });
+    set({ targets: newTargets, kills: newKills, lastKill: { pts, dist, id } });
     get().addScore(pts);
 
     const allDead = newTargets.every((t) => !t.alive);
@@ -132,6 +149,10 @@ export const useGameStore = create<GameState>((set, get) => ({
 
   setTargets: (targets) => set({ targets }),
 
+  triggerShot: () => set({ pendingShot: true }),
+  clearPendingShot: () => set({ pendingShot: false }),
+  clearLastKill: () => set({ lastKill: null }),
+
   resetGame: () =>
     set({
       phase: "menu",
@@ -146,5 +167,7 @@ export const useGameStore = create<GameState>((set, get) => ({
       reloadProgress: 0,
       targets: [],
       lastShot: 0,
+      pendingShot: false,
+      lastKill: null,
     }),
 }));
